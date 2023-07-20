@@ -11,7 +11,7 @@ with Path(keyfile).open() as f:
     private_key = f.read()
 user_client = EncordUserClient.create_with_ssh_private_key(private_key)
 
-project_hashes = ['20e8f07f-30a4-4840-836d-6633426d4d49']
+project_hashes = [ADD_YOUR_PROJECT_HASH_HERE]
 
 output_path = './dicom/'
 
