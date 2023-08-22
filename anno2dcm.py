@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import requests 
 import pydicom
+from imagecodecs import jpeg2k_encode
 from encord import EncordUserClient, Project
 import boto3
 from tqdm import tqdm
@@ -86,8 +87,12 @@ for p_hash in project_hashes:
                                         y2 = y1 + round(bb['boundingBox']['h'] * h)
                                     # Zero out pixels inside bounding box
                                     dcm.pixel_array[y1:y2,x1:x2] = 0
-                                    redacted_pixeldata = dcm.pixel_array.tobytes()
-                                    dcm.PixelData = redacted_pixeldata
+                                    if dcm.file_meta.TransferSyntaxUID == pydicom.uid.JPEG2000Lossless:
+                                        encoded = jpeg2k_encode(dcm.pixel_array, level=0)
+                                        dcm.PixelData = pydicom.encaps.encapsulate([encoded])
+                                    else:
+                                        redacted_pixeldata = dcm.pixel_array.tobytes()
+                                        dcm.PixelData = redacted_pixeldata
                                     # Store redacted file
                             f = os.path.join(output_dirname,output_filename)
                             # Store locally 
