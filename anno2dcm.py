@@ -76,6 +76,8 @@ for p_hash in project_hashes:
                     if lr.data_hash in annotations_storage.keys():
                         # We have annotations for the slice ...
                         dcm = pydicom.read_file(os.path.join(output_dirname,output_filename))
+                        if dcm.file_meta.TransferSyntaxUID == pydicom.uid.JPEG2000Lossless and dcm.BitsStored == 12:
+                            dcm.BitsStored = 16
                         for dicom_slice in annotations_storage[lr.data_hash]:
                             # Annotations found on the slice
                             for bb in dicom_slice['objects']:
