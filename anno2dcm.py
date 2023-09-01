@@ -99,7 +99,7 @@ for p_hash in project_hashes:
                         # Store locally
                         # dcm.save_as(f)
                         # Store in bucket
-                        client.upload_file(f, bucket_name, os.path.join(bucket_folder,os.path.basename(f)))
+                        client.upload_file(f, bucket_name, os.path.join(bucket_folder, lr.data_title, output_filename))
                     pbar.update(1)
 
 
