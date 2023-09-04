@@ -1,6 +1,4 @@
 import os
-from collections import defaultdict
-from pathlib import Path
 from typing import List, Dict, Tuple
 
 import boto3
@@ -9,22 +7,6 @@ import requests
 from encord import EncordUserClient
 from imagecodecs import jpeg2k_encode
 from tqdm import tqdm
-
-keyfile = Path.home() / ".ssh" / "id_ed25519"
-with Path(keyfile).open() as f:
-    private_key = f.read()
-user_client = EncordUserClient.create_with_ssh_private_key(private_key)
-client = boto3.client("s3")
-
-project_hashes = ['INSERT_YOUR_PROJECT_HASH']
-bucket_name = 'BUCKET_NAME'
-bucket_folder = 'Pixel-redaction-complete'
-
-output_path = './dicom/'
-
-isExist = os.path.exists(output_path)
-if not isExist:
-    os.makedirs(output_path)
 
 
 def get_redaction_bboxes_and_metadata(labels: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
@@ -54,50 +36,67 @@ def get_redaction_bboxes_and_metadata(labels: List[Dict]) -> Tuple[List[Dict], L
     return bboxes, metadata
 
 
-for p_hash in project_hashes:
-    project = user_client.get_project(p_hash)
-    for label_row in tqdm(project.list_label_rows()):
-        lr = project.get_label_row(label_row.label_hash, get_signed_url=True)
-        labels = list(lr['data_units'].values())[0]['labels'].values()
-        bboxes, metadata = get_redaction_bboxes_and_metadata(labels)
+def main(keyfile: str, project_hashes: List[str], bucket_name: str, bucket_folder: str) -> None:
+    user_client = EncordUserClient.create_with_ssh_private_key(ssh_private_key_path=keyfile)
+    client = boto3.client("s3")
 
-        # If there are annotations, download series and perform redaction
-        if len(bboxes) > 0:
-            output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
-            if not os.path.exists(output_dirname):
-                os.makedirs(output_dirname)
-            for meta in metadata:
-                r = requests.get(meta['signed_url'])
-                output_filename = meta['filename']
-                with open(os.path.join(output_dirname, output_filename), 'wb') as f:
-                    f.write(r.content)
-                dcm = pydicom.read_file(
-                    os.path.join(output_dirname, output_filename)
-                )
-                if (
-                        dcm.file_meta.TransferSyntaxUID == pydicom.uid.JPEG2000Lossless
-                        and dcm.BitsStored == 12
-                ):
-                    dcm.BitsStored = 16
-                for bbox in bboxes:
-                    # Zero out pixels inside bounding box
-                    dcm.pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = 0
+    output_path = './dicom/'
+    isExist = os.path.exists(output_path)
+    if not isExist:
+        os.makedirs(output_path)
+    for p_hash in project_hashes:
+        project = user_client.get_project(p_hash)
+        for label_row in tqdm(project.list_label_rows()):
+            lr = project.get_label_row(label_row.label_hash, get_signed_url=True)
+            labels = list(lr['data_units'].values())[0]['labels'].values()
+            bboxes, metadata = get_redaction_bboxes_and_metadata(labels)
+
+            # If there are annotations, download series and perform redaction
+            if len(bboxes) > 0:
+                output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
+                if not os.path.exists(output_dirname):
+                    os.makedirs(output_dirname)
+                for meta in metadata:
+                    r = requests.get(meta['signed_url'])
+                    output_filename = meta['filename']
+                    with open(os.path.join(output_dirname, output_filename), 'wb') as f:
+                        f.write(r.content)
+                    dcm = pydicom.read_file(
+                        os.path.join(output_dirname, output_filename)
+                    )
                     if (
-                            dcm.file_meta.TransferSyntaxUID
-                            == pydicom.uid.JPEG2000Lossless
+                            dcm.file_meta.TransferSyntaxUID == pydicom.uid.JPEG2000Lossless
+                            and dcm.BitsStored == 12
                     ):
-                        encoded = jpeg2k_encode(dcm.pixel_array, level=0)
-                        dcm.PixelData = pydicom.encaps.encapsulate([encoded])
-                    else:
-                        redacted_pixeldata = dcm.pixel_array.tobytes()
-                        dcm.PixelData = redacted_pixeldata
-                # Store redacted file
-                f = os.path.join(output_dirname, output_filename)
-                # Store locally
-                dcm.save_as(f)
-                # Store in bucket
-                client.upload_file(
-                    f,
-                    bucket_name,
-                    os.path.join(bucket_folder, lr.data_title, output_filename),
-                )
+                        dcm.BitsStored = 16
+                    for bbox in bboxes:
+                        # Zero out pixels inside bounding box
+                        dcm.pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = 0
+                        if (
+                                dcm.file_meta.TransferSyntaxUID
+                                == pydicom.uid.JPEG2000Lossless
+                        ):
+                            encoded = jpeg2k_encode(dcm.pixel_array, level=0)
+                            dcm.PixelData = pydicom.encaps.encapsulate([encoded])
+                        else:
+                            redacted_pixeldata = dcm.pixel_array.tobytes()
+                            dcm.PixelData = redacted_pixeldata
+                    # Store redacted file
+                    f = os.path.join(output_dirname, output_filename)
+                    # Store locally
+                    dcm.save_as(f)
+                    # Store in bucket
+                    client.upload_file(
+                        f,
+                        bucket_name,
+                        os.path.join(bucket_folder, lr.data_title, output_filename),
+                    )
+
+
+if __name__ == '__main__':
+    main(
+        keyfile='PATH_TO_KEYFILE',
+        project_hashes=['PROJECT_HASH'],
+        bucket_name='BUCKET_NAME',
+        bucket_folder='BUCKET_FOLDER'
+    )
