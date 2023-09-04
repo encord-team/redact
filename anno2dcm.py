@@ -1,4 +1,5 @@
 import os
+import shutil
 from typing import List, Dict, Tuple
 
 import boto3
@@ -6,6 +7,7 @@ import pydicom
 import requests
 from encord import EncordUserClient
 from imagecodecs import jpeg2k_encode
+from pydicom import FileDataset
 from tqdm import tqdm
 
 
@@ -36,6 +38,33 @@ def get_redaction_bboxes_and_metadata(labels: List[Dict]) -> Tuple[List[Dict], L
     return bboxes, metadata
 
 
+def redact_slice(bboxes: List[Dict], meta: Dict, output_dirname: str, output_filename: str) -> FileDataset:
+    r = requests.get(meta['signed_url'])
+    with open(os.path.join(output_dirname, output_filename), 'wb') as f:
+        f.write(r.content)
+    dcm = pydicom.read_file(
+        os.path.join(output_dirname, output_filename)
+    )
+    if (
+            dcm.file_meta.TransferSyntaxUID == pydicom.uid.JPEG2000Lossless
+            and dcm.BitsStored == 12
+    ):
+        dcm.BitsStored = 16
+    for bbox in bboxes:
+        # Zero out pixels inside bounding box
+        dcm.pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = 0
+        if (
+                dcm.file_meta.TransferSyntaxUID
+                == pydicom.uid.JPEG2000Lossless
+        ):
+            encoded = jpeg2k_encode(dcm.pixel_array, level=0)
+            dcm.PixelData = pydicom.encaps.encapsulate([encoded])
+        else:
+            redacted_pixeldata = dcm.pixel_array.tobytes()
+            dcm.PixelData = redacted_pixeldata
+    return dcm
+
+
 def main(keyfile: str, project_hashes: List[str], bucket_name: str, bucket_folder: str) -> None:
     user_client = EncordUserClient.create_with_ssh_private_key(ssh_private_key_path=keyfile)
     client = boto3.client("s3")
@@ -56,41 +85,18 @@ def main(keyfile: str, project_hashes: List[str], bucket_name: str, bucket_folde
                 output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
                 if not os.path.exists(output_dirname):
                     os.makedirs(output_dirname)
+
                 for meta in metadata:
-                    r = requests.get(meta['signed_url'])
                     output_filename = meta['filename']
-                    with open(os.path.join(output_dirname, output_filename), 'wb') as f:
-                        f.write(r.content)
-                    dcm = pydicom.read_file(
-                        os.path.join(output_dirname, output_filename)
-                    )
-                    if (
-                            dcm.file_meta.TransferSyntaxUID == pydicom.uid.JPEG2000Lossless
-                            and dcm.BitsStored == 12
-                    ):
-                        dcm.BitsStored = 16
-                    for bbox in bboxes:
-                        # Zero out pixels inside bounding box
-                        dcm.pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = 0
-                        if (
-                                dcm.file_meta.TransferSyntaxUID
-                                == pydicom.uid.JPEG2000Lossless
-                        ):
-                            encoded = jpeg2k_encode(dcm.pixel_array, level=0)
-                            dcm.PixelData = pydicom.encaps.encapsulate([encoded])
-                        else:
-                            redacted_pixeldata = dcm.pixel_array.tobytes()
-                            dcm.PixelData = redacted_pixeldata
-                    # Store redacted file
+                    dcm = redact_slice(bboxes, meta, output_dirname, output_filename)
                     f = os.path.join(output_dirname, output_filename)
-                    # Store locally
                     dcm.save_as(f)
-                    # Store in bucket
                     client.upload_file(
                         f,
                         bucket_name,
                         os.path.join(bucket_folder, lr.data_title, output_filename),
                     )
+    shutil.rmtree(output_path)
 
 
 if __name__ == '__main__':
