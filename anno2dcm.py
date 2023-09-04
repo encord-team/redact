@@ -35,21 +35,18 @@ metadata_storage = {}
 """
 for p_hash in project_hashes:
     project = user_client.get_project(p_hash)
-    for label_row in project.list_label_rows():
+    for label_row in tqdm(project.list_label_rows()):
         lr = project.get_label_row(label_row.label_hash, get_signed_url=True)
-        with tqdm(
-            total=len(list(lr['data_units'].values())[0]['labels'].values())
-        ) as pbar:
-            for dicom_slice in list(lr['data_units'].values())[0]['labels'].values():
-                data_hash = lr.data_hash
-                # Check if annotations exist
-                if len(dicom_slice['objects']) > 0:
-                    annotations_storage[data_hash].append(dicom_slice)
-                metadata_storage[data_hash] = {
-                    'w': dicom_slice['metadata']['width'],
-                    'h': dicom_slice['metadata']['height']
-                }
-                pbar.update(1)
+        labels = list(lr['data_units'].values())[0]['labels'].values()
+        for dicom_slice in labels:
+            data_hash = lr.data_hash
+            # Check if annotations exist
+            if len(dicom_slice['objects']) > 0:
+                annotations_storage[data_hash].append(dicom_slice)
+            metadata_storage[data_hash] = {
+                'w': dicom_slice['metadata']['width'],
+                'h': dicom_slice['metadata']['height']
+            }
 
 """
     Now in the second pass we propagate all found bounding boxes to all slices 
