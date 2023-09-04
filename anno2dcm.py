@@ -1,6 +1,7 @@
 import os
 from collections import defaultdict
 from pathlib import Path
+from typing import List, Dict, Tuple
 
 import boto3
 import pydicom
@@ -25,36 +26,40 @@ isExist = os.path.exists(output_path)
 if not isExist:
     os.makedirs(output_path)
 
+
+def get_redaction_bboxes_and_metadata(labels: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    # Extract all annotations from the series
+    bboxes = []
+    metadata = []
+
+    for dicom_slice in labels:
+        metadata.append({
+            'signed_url': dicom_slice['metadata']['file_uri'],
+            'filename': dicom_slice['metadata']['dicom_instance_uid'] + '.dcm'
+        })
+        # Check if annotations exist
+        if len(dicom_slice['objects']) > 0:
+            for bb in dicom_slice['objects']:
+                if 'boundingBox' in bb.keys():
+                    w = dicom_slice['metadata']['width']
+                    h = dicom_slice['metadata']['height']
+                    x1 = round(bb['boundingBox']['x'] * w)
+                    y1 = round(bb['boundingBox']['y'] * h)
+                    bboxes.append({
+                        'x1': x1,
+                        'y1': y1,
+                        'x2': x1 + round(bb['boundingBox']['w'] * w),
+                        'y2': y1 + round(bb['boundingBox']['h'] * h)
+                    })
+    return bboxes, metadata
+
+
 for p_hash in project_hashes:
     project = user_client.get_project(p_hash)
     for label_row in tqdm(project.list_label_rows()):
         lr = project.get_label_row(label_row.label_hash, get_signed_url=True)
         labels = list(lr['data_units'].values())[0]['labels'].values()
-
-        # Extract all annotations from the series
-        bboxes = []
-        metadata = []
-
-        for dicom_slice in labels:
-            data_hash = lr.data_hash
-            metadata.append({
-                'signed_url': dicom_slice['metadata']['file_uri'],
-                'filename': dicom_slice['metadata']['dicom_instance_uid'] + '.dcm'
-            })
-            # Check if annotations exist
-            if len(dicom_slice['objects']) > 0:
-                for bb in dicom_slice['objects']:
-                    if 'boundingBox' in bb.keys():
-                        w = dicom_slice['metadata']['width']
-                        h = dicom_slice['metadata']['height']
-                        x1 = round(bb['boundingBox']['x'] * w)
-                        y1 = round(bb['boundingBox']['y'] * h)
-                        bboxes.append({
-                            'x1': x1,
-                            'y1': y1,
-                            'x2': x1 + round(bb['boundingBox']['w'] * w),
-                            'y2': y1 + round(bb['boundingBox']['h'] * h)
-                        })
+        bboxes, metadata = get_redaction_bboxes_and_metadata(labels)
 
         # If there are annotations, download series and perform redaction
         if len(bboxes) > 0:
