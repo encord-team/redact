@@ -95,9 +95,9 @@ for p_hash in project_hashes:
                                     redacted_pixeldata = dcm.pixel_array.tobytes()
                                     dcm.PixelData = redacted_pixeldata
                         # Store redacted file
-                        f = os.path.join(output_dirname,output_filename)
+                        f = os.path.join(output_dirname, output_filename)
                         # Store locally
-                        # dcm.save_as(f)
+                        dcm.save_as(f)
                         # Store in bucket
                         client.upload_file(f, bucket_name, os.path.join(bucket_folder, lr.data_title, output_filename))
                     pbar.update(1)
