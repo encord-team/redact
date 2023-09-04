@@ -25,9 +25,9 @@ isExist = os.path.exists(output_path)
 if not isExist:
     os.makedirs(output_path)
 
-
-annotations_storage = defaultdict(list)
 # Store annotation in dict keyed by the data_hash
+annotations_storage = defaultdict(list)
+metadata_storage = {}
 
 
 """
@@ -41,9 +41,14 @@ for p_hash in project_hashes:
             total=len(list(lr['data_units'].values())[0]['labels'].values())
         ) as pbar:
             for dicom_slice in list(lr['data_units'].values())[0]['labels'].values():
+                data_hash = lr.data_hash
                 # Check if annotations exist
                 if len(dicom_slice['objects']) > 0:
-                    annotations_storage[lr.data_hash].append(dicom_slice)
+                    annotations_storage[data_hash].append(dicom_slice)
+                metadata_storage[data_hash] = {
+                    'w': dicom_slice['metadata']['width'],
+                    'h': dicom_slice['metadata']['height']
+                }
                 pbar.update(1)
 
 """
@@ -58,8 +63,8 @@ for p_hash in project_hashes:
             total=len(list(lr['data_units'].values())[0]['labels'].values())
         ) as pbar:
             for dicom_slice in list(lr['data_units'].values())[0]['labels'].values():
-                w = dicom_slice['metadata']['width']
-                h = dicom_slice['metadata']['height']
+                w = metadata_storage[lr.data_hash]['w']
+                h = metadata_storage[lr.data_hash]['h']
                 # First save slice
                 r = requests.get(dicom_slice['metadata']['file_uri'])
                 output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
