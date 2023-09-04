@@ -1,4 +1,5 @@
 import os
+from collections import defaultdict
 from pathlib import Path
 
 import boto3
@@ -25,7 +26,7 @@ if not isExist:
     os.makedirs(output_path)
 
 
-annotations_storage = {}
+annotations_storage = defaultdict(list)
 # Store annotation in dict keyed by the data_hash
 
 
@@ -42,12 +43,7 @@ for p_hash in project_hashes:
             for dicom_slice in list(lr['data_units'].values())[0]['labels'].values():
                 # Check if annotations exist
                 if len(dicom_slice['objects']) > 0:
-                    if lr.data_hash in annotations_storage.keys():
-                        annos = annotations_storage[lr.data_hash]
-                        annos.append(dicom_slice)
-                        annotations_storage[lr.data_hash] = annos
-                    else:
-                        annotations_storage.update({lr.data_hash: [dicom_slice]})
+                    annotations_storage[lr.data_hash].append(dicom_slice)
                 pbar.update(1)
 
 """
