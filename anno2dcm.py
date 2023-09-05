@@ -73,12 +73,11 @@ def main(
     user_client = EncordUserClient.create_with_ssh_private_key(
         ssh_private_key_path=keyfile
     )
-    client = boto3.client("s3")
-
+    s3_client = boto3.client("s3")
     output_path = './dicom/'
-    isExist = os.path.exists(output_path)
-    if not isExist:
+    if not os.path.exists(output_path):
         os.makedirs(output_path)
+
     for p_hash in project_hashes:
         project = user_client.get_project(p_hash)
         for lrm in (lr_pbar := tqdm(project.list_label_rows())):
@@ -99,7 +98,7 @@ def main(
                     dcm = redact_slice(redaction_bboxes, meta, output_dirname, output_filename)
                     f = os.path.join(output_dirname, output_filename)
                     dcm.save_as(f)
-                    client.upload_file(
+                    s3_client.upload_file(
                         f,
                         bucket_name,
                         os.path.join(bucket_folder, lr.data_title, output_filename),
