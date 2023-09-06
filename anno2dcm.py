@@ -1,109 +1,115 @@
 import os
-from pathlib import Path
-import requests 
-import pydicom
-from imagecodecs import jpeg2k_encode
-from encord import EncordUserClient, Project
+import shutil
+from typing import List, Dict, Tuple
+
 import boto3
+import requests
+from encord import EncordUserClient
+from imagecodecs import jpeg2k_encode
+from pydicom import read_file, FileDataset
+from pydicom.encaps import encapsulate
+from pydicom.uid import JPEG2000Lossless
 from tqdm import tqdm
-import numpy as np
 
 
+def get_redaction_bboxes_and_metadata(
+    labels: List[Dict],
+) -> Tuple[List[Dict], List[Dict]]:
+    # Extract all annotations from the series
+    redaction_bboxes = []
+    metadata = []
 
-
-keyfile = Path.home() / ".ssh" / "id_ed25519"
-with Path(keyfile).open() as f:
-    private_key = f.read()
-user_client = EncordUserClient.create_with_ssh_private_key(private_key)
-client = boto3.client("s3")
-
-project_hashes = [INSERT_YOUR_PROJECT_HASH]
-bucket_name = 'BUCKET_NAME'
-bucket_folder = 'Pixel-redaction-complete'
-
-output_path = './dicom/'
-
-isExist = os.path.exists(output_path)
-if not isExist:
-   os.makedirs(output_path)
-
-
-annotations_storage = {}
-# Store annotation in dict keyed by the data_hash
-
-
-"""
-    First, cache all the annotations in a project
-"""
-for p_hash in project_hashes:
-    project = user_client.get_project(p_hash)    
-    for label_row in project.list_label_rows():
-            lr = project.get_label_row(label_row.label_hash, get_signed_url=True)
-            with tqdm(total=len(list(lr['data_units'].values())[0]['labels'].values())) as pbar:
-                for dicom_slice in list(lr['data_units'].values())[0]['labels'].values():
-                    # Check if annotations exist
-                    if len(dicom_slice['objects'])>0:
-                        if lr.data_hash in annotations_storage.keys():     
-                            annos = annotations_storage[lr.data_hash]
-                            annos.append(dicom_slice)
-                            annotations_storage[lr.data_hash]=annos
-                        else:
-                            annotations_storage.update({lr.data_hash:[dicom_slice]})                      
-                    pbar.update(1)
-
-"""
-    Now in the second pass we propagate all found bounding boxes to all slices 
-"""
-
-for p_hash in project_hashes:
-    project = user_client.get_project(p_hash)
-    for label_row in project.list_label_rows():
-            lr = project.get_label_row(label_row.label_hash, get_signed_url=True)
-            with tqdm(total=len(list(lr['data_units'].values())[0]['labels'].values())) as pbar:
-                for dicom_slice in list(lr['data_units'].values())[0]['labels'].values():
+    for dicom_slice in labels:
+        metadata.append(
+            {
+                'signed_url': dicom_slice['metadata']['file_uri'],
+                'filename': dicom_slice['metadata']['dicom_instance_uid'] + '.dcm',
+            }
+        )
+        # Check if annotations exist
+        if len(dicom_slice['objects']) > 0:
+            for bb in dicom_slice['objects']:
+                if 'boundingBox' in bb.keys():
                     w = dicom_slice['metadata']['width']
                     h = dicom_slice['metadata']['height']
-                     # First save slice
-                    r = requests.get(dicom_slice['metadata']['file_uri'])
-                    output_dirname = os.path.join(os.path.join(output_path,lr.data_hash))
-                    output_filename = dicom_slice['metadata']['dicom_instance_uid'] + '.dcm'
-                    if not os.path.exists(output_dirname):
-                        os.makedirs(output_dirname)
-                    with open(os.path.join(output_dirname,output_filename), 'wb') as f:
-                        _ = f.write(r.content)
-
-                    # Check if annotations exist
-                    if lr.data_hash in annotations_storage.keys():
-                        # We have annotations for the slice ...
-                        dcm = pydicom.read_file(os.path.join(output_dirname,output_filename))
-                        if dcm.file_meta.TransferSyntaxUID == pydicom.uid.JPEG2000Lossless and dcm.BitsStored == 12:
-                            dcm.BitsStored = 16
-                        for dicom_slice in annotations_storage[lr.data_hash]:
-                            # Annotations found on the slice
-                            for bb in dicom_slice['objects']:
-                                if 'boundingBox' in bb.keys():
-                                    x1 = round(bb['boundingBox']['x'] * w)
-                                    y1 = round(bb['boundingBox']['y'] * h)
-                                    x2 = x1 + round(bb['boundingBox']['w'] * w)
-                                    y2 = y1 + round(bb['boundingBox']['h'] * h)
-                                # Zero out pixels inside bounding box
-                                dcm.pixel_array[y1:y2,x1:x2] = 0
-                                if dcm.file_meta.TransferSyntaxUID == pydicom.uid.JPEG2000Lossless:
-                                    encoded = jpeg2k_encode(dcm.pixel_array, level=0)
-                                    dcm.PixelData = pydicom.encaps.encapsulate([encoded])
-                                else:
-                                    redacted_pixeldata = dcm.pixel_array.tobytes()
-                                    dcm.PixelData = redacted_pixeldata
-                        # Store redacted file
-                        f = os.path.join(output_dirname, output_filename)
-                        # Store locally
-                        dcm.save_as(f)
-                        # Store in bucket
-                        client.upload_file(f, bucket_name, os.path.join(bucket_folder, lr.data_title, output_filename))
-                    pbar.update(1)
+                    x1 = round(bb['boundingBox']['x'] * w)
+                    y1 = round(bb['boundingBox']['y'] * h)
+                    redaction_bboxes.append(
+                        {
+                            'x1': x1,
+                            'y1': y1,
+                            'x2': x1 + round(bb['boundingBox']['w'] * w),
+                            'y2': y1 + round(bb['boundingBox']['h'] * h),
+                        }
+                    )
+    return redaction_bboxes, metadata
 
 
+def redact_slice(
+    redaction_bboxes: List[Dict], meta: Dict, output_dirname: str, output_filename: str
+) -> FileDataset:
+    r = requests.get(meta['signed_url'])
+    with open(os.path.join(output_dirname, output_filename), 'wb') as f:
+        f.write(r.content)
+    dcm = read_file(os.path.join(output_dirname, output_filename))
+    if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless and dcm.BitsStored == 12:
+        dcm.BitsStored = 16
+
+    for bbox in redaction_bboxes:
+        # Zero out pixels inside bounding box
+        dcm.pixel_array[bbox['y1'] : bbox['y2'], bbox['x1'] : bbox['x2']] = 0
+        if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless:
+            encoded = jpeg2k_encode(dcm.pixel_array, level=0)
+            dcm.PixelData = encapsulate([encoded])
+        else:
+            redacted_pixeldata = dcm.pixel_array.tobytes()
+            dcm.PixelData = redacted_pixeldata
+    return dcm
 
 
+def main(
+    keyfile: str, project_hashes: List[str], bucket_name: str, bucket_folder: str
+) -> None:
+    user_client = EncordUserClient.create_with_ssh_private_key(
+        ssh_private_key_path=keyfile
+    )
+    s3_client = boto3.client("s3")
+    output_path = './dicom/'
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+
+    for p_hash in project_hashes:
+        project = user_client.get_project(p_hash)
+        for lrm in (lr_pbar := tqdm(project.list_label_rows())):
+            lr_pbar.set_description(f'Looking for redactions on {lrm.data_title}')
+            lr = project.get_label_row(lrm.label_hash, get_signed_url=True)
+            labels = list(lr['data_units'].values())[0]['labels'].values()
+            redaction_bboxes, metadata = get_redaction_bboxes_and_metadata(labels)
+
+            # If there are annotations, download series and perform redaction
+            if len(redaction_bboxes) > 0:
+                lr_pbar.set_description(f'Redacting {lrm.data_title}')
+                output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
+                if not os.path.exists(output_dirname):
+                    os.makedirs(output_dirname)
+
+                for meta in metadata:
+                    output_filename = meta['filename']
+                    dcm = redact_slice(redaction_bboxes, meta, output_dirname, output_filename)
+                    f = os.path.join(output_dirname, output_filename)
+                    dcm.save_as(f)
+                    s3_client.upload_file(
+                        f,
+                        bucket_name,
+                        os.path.join(bucket_folder, lr.data_title, output_filename),
+                    )
+    shutil.rmtree(output_path)
 
 
+if __name__ == '__main__':
+    main(
+        keyfile='PATH_TO_KEYFILE',
+        project_hashes=['PROJECT_HASH'],
+        bucket_name='BUCKET_NAME',
+        bucket_folder='BUCKET_FOLDER'
+    )
