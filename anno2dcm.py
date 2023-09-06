@@ -86,7 +86,7 @@ def main(
 
     for p_hash in project_hashes:
         project = user_client.get_project(p_hash)
-        completed_lrms = project.list_label_rows(label_statuses=[AnnotationTaskStatus.COMPLETED])
+        completed_lrms = project.list_label_rows_v2(workflow_graph_node_title_eq='Complete')
         print(f'Project {project.title} has {len(completed_lrms)} completed label rows.')
         for lrm in (lr_pbar := tqdm(completed_lrms)):
             lr_pbar.set_description(f'Redacting {lrm.data_title}')
