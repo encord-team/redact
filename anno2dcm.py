@@ -56,7 +56,7 @@ def redact_slice(
     with open(os.path.join(output_dirname, output_filename), 'wb') as f:
         f.write(r.content)
     dcm = read_file(os.path.join(output_dirname, output_filename))
-    if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless and dcm.BitsStored == 12:
+    if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless and dcm.BitsStored != 16:
         dcm.BitsStored = 16
 
     for bbox in redaction_bboxes:
