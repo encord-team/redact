@@ -5,6 +5,7 @@ from typing import List, Dict, Tuple
 import boto3
 import requests
 from encord import EncordUserClient
+from encord.orm.label_row import AnnotationTaskStatus
 from imagecodecs import jpeg2k_encode
 from pydicom import read_file, FileDataset
 from pydicom.encaps import encapsulate
@@ -57,13 +58,13 @@ def redact_slice(
 
     for bbox in redaction_bboxes:
         # Zero out pixels inside bounding box
-        dcm.pixel_array[bbox['y1'] : bbox['y2'], bbox['x1'] : bbox['x2']] = 0
-        if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless:
-            encoded = jpeg2k_encode(dcm.pixel_array, level=0)
-            dcm.PixelData = encapsulate([encoded])
-        else:
-            redacted_pixeldata = dcm.pixel_array.tobytes()
-            dcm.PixelData = redacted_pixeldata
+        dcm.pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = 0
+    if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless:
+        encoded = jpeg2k_encode(dcm.pixel_array, level=0)
+        dcm.PixelData = encapsulate([encoded])
+    else:
+        redacted_pixeldata = dcm.pixel_array.tobytes()
+        dcm.PixelData = redacted_pixeldata
     return dcm
 
 
@@ -80,29 +81,28 @@ def main(
 
     for p_hash in project_hashes:
         project = user_client.get_project(p_hash)
-        for lrm in (lr_pbar := tqdm(project.list_label_rows())):
-            lr_pbar.set_description(f'Looking for redactions on {lrm.data_title}')
+        completed_lrms = project.list_label_rows(label_statuses=[AnnotationTaskStatus.COMPLETED])
+        print(f'Project {project.title} has {len(completed_lrms)} completed label rows.')
+        for lrm in (lr_pbar := tqdm(completed_lrms)):
+            lr_pbar.set_description(f'Redacting {lrm.data_title}')
             lr = project.get_label_row(lrm.label_hash, get_signed_url=True)
             labels = list(lr['data_units'].values())[0]['labels'].values()
             redaction_bboxes, metadata = get_redaction_bboxes_and_metadata(labels)
 
-            # If there are annotations, download series and perform redaction
-            if len(redaction_bboxes) > 0:
-                lr_pbar.set_description(f'Redacting {lrm.data_title}')
-                output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
-                if not os.path.exists(output_dirname):
-                    os.makedirs(output_dirname)
+            output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
+            if not os.path.exists(output_dirname):
+                os.makedirs(output_dirname)
 
-                for meta in metadata:
-                    output_filename = meta['filename']
-                    dcm = redact_slice(redaction_bboxes, meta, output_dirname, output_filename)
-                    f = os.path.join(output_dirname, output_filename)
-                    dcm.save_as(f)
-                    s3_client.upload_file(
-                        f,
-                        bucket_name,
-                        os.path.join(bucket_folder, lr.data_title, output_filename),
-                    )
+            for meta in metadata:
+                output_filename = meta['filename']
+                dcm = redact_slice(redaction_bboxes, meta, output_dirname, output_filename)
+                f = os.path.join(output_dirname, output_filename)
+                dcm.save_as(f)
+                s3_client.upload_file(
+                    f,
+                    bucket_name,
+                    os.path.join(bucket_folder, lr.data_title, output_filename),
+                )
     shutil.rmtree(output_path)
 
 
