@@ -14,33 +14,35 @@ from tqdm import tqdm
 
 
 def get_redaction_bboxes_and_metadata(
-    labels: List[Dict],
+    labels: Dict,
 ) -> Tuple[List[Dict], List[Dict]]:
     # Extract all annotations from the series
     redaction_bboxes = []
     metadata = []
 
-    for dicom_slice in labels:
+    for slice_number, dicom_slice in labels.items():
         metadata.append(
             {
                 'signed_url': dicom_slice['metadata']['file_uri'],
                 'filename': dicom_slice['metadata']['dicom_instance_uid'] + '.dcm',
+                'slice_number': slice_number
             }
         )
         # Check if annotations exist
         if len(dicom_slice['objects']) > 0:
-            for bb in dicom_slice['objects']:
-                if 'boundingBox' in bb.keys():
+            for obj in dicom_slice['objects']:
+                if 'boundingBox' in obj.keys():
                     w = dicom_slice['metadata']['width']
                     h = dicom_slice['metadata']['height']
-                    x1 = round(bb['boundingBox']['x'] * w)
-                    y1 = round(bb['boundingBox']['y'] * h)
+                    x1 = round(obj['boundingBox']['x'] * w)
+                    y1 = round(obj['boundingBox']['y'] * h)
                     redaction_bboxes.append(
                         {
                             'x1': x1,
                             'y1': y1,
-                            'x2': x1 + round(bb['boundingBox']['w'] * w),
-                            'y2': y1 + round(bb['boundingBox']['h'] * h),
+                            'x2': x1 + round(obj['boundingBox']['w'] * w),
+                            'y2': y1 + round(obj['boundingBox']['h'] * h),
+                            'slice_number': None if obj['value'] == 'series_redaction' else slice_number
                         }
                     )
     return redaction_bboxes, metadata
@@ -50,6 +52,7 @@ def redact_slice(
     redaction_bboxes: List[Dict], meta: Dict, output_dirname: str, output_filename: str
 ) -> FileDataset:
     r = requests.get(meta['signed_url'])
+    slice_number = meta['slice_number']
     with open(os.path.join(output_dirname, output_filename), 'wb') as f:
         f.write(r.content)
     dcm = read_file(os.path.join(output_dirname, output_filename))
@@ -57,8 +60,10 @@ def redact_slice(
         dcm.BitsStored = 16
 
     for bbox in redaction_bboxes:
-        # Zero out pixels inside bounding box
-        dcm.pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = 0
+        # Zero out pixels inside bounding box if no slice number (series redaction)
+        # or slice numbers match (image redaction)
+        if not bbox['slice_number'] or bbox['slice_number'] == slice_number:
+            dcm.pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = 0
     if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless:
         encoded = jpeg2k_encode(dcm.pixel_array, level=0)
         dcm.PixelData = encapsulate([encoded])
@@ -86,7 +91,7 @@ def main(
         for lrm in (lr_pbar := tqdm(completed_lrms)):
             lr_pbar.set_description(f'Redacting {lrm.data_title}')
             lr = project.get_label_row(lrm.label_hash, get_signed_url=True)
-            labels = list(lr['data_units'].values())[0]['labels'].values()
+            labels = list(lr['data_units'].values())[0]['labels']
             redaction_bboxes, metadata = get_redaction_bboxes_and_metadata(labels)
 
             output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
