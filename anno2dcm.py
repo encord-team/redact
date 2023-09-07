@@ -3,9 +3,9 @@ import shutil
 from typing import List, Dict, Tuple
 
 import boto3
+import numpy as np
 import requests
 from encord import EncordUserClient
-from encord.orm.label_row import AnnotationTaskStatus
 from imagecodecs import jpeg2k_encode
 from pydicom import read_file, FileDataset
 from pydicom.encaps import encapsulate
@@ -56,20 +56,21 @@ def redact_slice(
     with open(os.path.join(output_dirname, output_filename), 'wb') as f:
         f.write(r.content)
     dcm = read_file(os.path.join(output_dirname, output_filename))
-    if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless and dcm.BitsStored != 16:
-        dcm.BitsStored = 16
-
+    pixel_array = np.array(dcm.pixel_array)
+    if len(pixel_array.shape) == 3 and pixel_array.shape[2] == 3:
+        zero_val = np.array([0, 0, 0])
+    else:
+        zero_val = 0
     for bbox in redaction_bboxes:
         # Zero out pixels inside bounding box if no slice number (series redaction)
         # or slice numbers match (image redaction)
         if not bbox['slice_number'] or bbox['slice_number'] == slice_number:
-            dcm.pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = 0
+            pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = zero_val
+
     if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless:
-        encoded = jpeg2k_encode(dcm.pixel_array, level=0)
-        dcm.PixelData = encapsulate([encoded])
+        dcm.PixelData = encapsulate([jpeg2k_encode(pixel_array, level=0)])
     else:
-        redacted_pixeldata = dcm.pixel_array.tobytes()
-        dcm.PixelData = redacted_pixeldata
+        dcm.PixelData = encapsulate([pixel_array.tobytes()])
     return dcm
 
 
