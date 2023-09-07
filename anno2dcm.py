@@ -3,43 +3,47 @@ import shutil
 from typing import List, Dict, Tuple
 
 import boto3
+import numpy as np
 import requests
 from encord import EncordUserClient
 from imagecodecs import jpeg2k_encode
 from pydicom import read_file, FileDataset
 from pydicom.encaps import encapsulate
+from pydicom.pixel_data_handlers.numpy_handler import get_pixeldata
 from pydicom.uid import JPEG2000Lossless
 from tqdm import tqdm
 
 
 def get_redaction_bboxes_and_metadata(
-    labels: List[Dict],
+    labels: Dict,
 ) -> Tuple[List[Dict], List[Dict]]:
     # Extract all annotations from the series
     redaction_bboxes = []
     metadata = []
 
-    for dicom_slice in labels:
+    for slice_number, dicom_slice in labels.items():
         metadata.append(
             {
                 'signed_url': dicom_slice['metadata']['file_uri'],
                 'filename': dicom_slice['metadata']['dicom_instance_uid'] + '.dcm',
+                'slice_number': slice_number
             }
         )
         # Check if annotations exist
         if len(dicom_slice['objects']) > 0:
-            for bb in dicom_slice['objects']:
-                if 'boundingBox' in bb.keys():
+            for obj in dicom_slice['objects']:
+                if 'boundingBox' in obj.keys():
                     w = dicom_slice['metadata']['width']
                     h = dicom_slice['metadata']['height']
-                    x1 = round(bb['boundingBox']['x'] * w)
-                    y1 = round(bb['boundingBox']['y'] * h)
+                    x1 = round(obj['boundingBox']['x'] * w)
+                    y1 = round(obj['boundingBox']['y'] * h)
                     redaction_bboxes.append(
                         {
                             'x1': x1,
                             'y1': y1,
-                            'x2': x1 + round(bb['boundingBox']['w'] * w),
-                            'y2': y1 + round(bb['boundingBox']['h'] * h),
+                            'x2': x1 + round(obj['boundingBox']['w'] * w),
+                            'y2': y1 + round(obj['boundingBox']['h'] * h),
+                            'slice_number': None if obj['value'] == 'series_redaction' else slice_number
                         }
                     )
     return redaction_bboxes, metadata
@@ -49,21 +53,32 @@ def redact_slice(
     redaction_bboxes: List[Dict], meta: Dict, output_dirname: str, output_filename: str
 ) -> FileDataset:
     r = requests.get(meta['signed_url'])
+    slice_number = meta['slice_number']
     with open(os.path.join(output_dirname, output_filename), 'wb') as f:
         f.write(r.content)
     dcm = read_file(os.path.join(output_dirname, output_filename))
-    if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless and dcm.BitsStored == 12:
-        dcm.BitsStored = 16
 
+    try:
+        get_pixeldata(dcm)
+    except NotImplementedError:
+        dcm.decompress()
+    pixel_array = dcm.pixel_array
+
+    is_three_channel = len(pixel_array.shape) == 3 and pixel_array.shape[2] == 3
+    if is_three_channel:
+        zero_val = np.array([0, 0, 0])
+    else:
+        zero_val = 0
     for bbox in redaction_bboxes:
-        # Zero out pixels inside bounding box
-        dcm.pixel_array[bbox['y1'] : bbox['y2'], bbox['x1'] : bbox['x2']] = 0
-        if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless:
-            encoded = jpeg2k_encode(dcm.pixel_array, level=0)
-            dcm.PixelData = encapsulate([encoded])
-        else:
-            redacted_pixeldata = dcm.pixel_array.tobytes()
-            dcm.PixelData = redacted_pixeldata
+        # Zero out pixels inside bounding box if no slice number (series redaction)
+        # or slice numbers match (image redaction)
+        if not bbox['slice_number'] or bbox['slice_number'] == slice_number:
+            pixel_array[bbox['y1']:bbox['y2'], bbox['x1']:bbox['x2']] = zero_val
+
+    if dcm.file_meta.TransferSyntaxUID == JPEG2000Lossless:
+        dcm.PixelData = encapsulate([jpeg2k_encode(pixel_array, level=0)])
+    else:
+        dcm.PixelData = encapsulate([pixel_array.tobytes()])
     return dcm
 
 
@@ -80,29 +95,28 @@ def main(
 
     for p_hash in project_hashes:
         project = user_client.get_project(p_hash)
-        for lrm in (lr_pbar := tqdm(project.list_label_rows())):
-            lr_pbar.set_description(f'Looking for redactions on {lrm.data_title}')
+        completed_lrms = project.list_label_rows_v2(workflow_graph_node_title_eq='Complete')
+        print(f'Project {project.title} has {len(completed_lrms)} completed label rows.')
+        for lrm in (lr_pbar := tqdm(completed_lrms)):
+            lr_pbar.set_description(f'Redacting {lrm.data_title}')
             lr = project.get_label_row(lrm.label_hash, get_signed_url=True)
-            labels = list(lr['data_units'].values())[0]['labels'].values()
+            labels = list(lr['data_units'].values())[0]['labels']
             redaction_bboxes, metadata = get_redaction_bboxes_and_metadata(labels)
 
-            # If there are annotations, download series and perform redaction
-            if len(redaction_bboxes) > 0:
-                lr_pbar.set_description(f'Redacting {lrm.data_title}')
-                output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
-                if not os.path.exists(output_dirname):
-                    os.makedirs(output_dirname)
+            output_dirname = os.path.join(os.path.join(output_path, lr.data_hash))
+            if not os.path.exists(output_dirname):
+                os.makedirs(output_dirname)
 
-                for meta in metadata:
-                    output_filename = meta['filename']
-                    dcm = redact_slice(redaction_bboxes, meta, output_dirname, output_filename)
-                    f = os.path.join(output_dirname, output_filename)
-                    dcm.save_as(f)
-                    s3_client.upload_file(
-                        f,
-                        bucket_name,
-                        os.path.join(bucket_folder, lr.data_title, output_filename),
-                    )
+            for meta in metadata:
+                output_filename = meta['filename']
+                dcm = redact_slice(redaction_bboxes, meta, output_dirname, output_filename)
+                f = os.path.join(output_dirname, output_filename)
+                dcm.save_as(f)
+                s3_client.upload_file(
+                    f,
+                    bucket_name,
+                    os.path.join(bucket_folder, lr.data_title, output_filename),
+                )
     shutil.rmtree(output_path)
 
 
