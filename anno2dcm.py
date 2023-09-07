@@ -9,6 +9,7 @@ from encord import EncordUserClient
 from imagecodecs import jpeg2k_encode
 from pydicom import read_file, FileDataset
 from pydicom.encaps import encapsulate
+from pydicom.pixel_data_handlers.numpy_handler import get_pixeldata
 from pydicom.uid import JPEG2000Lossless
 from tqdm import tqdm
 
@@ -56,8 +57,15 @@ def redact_slice(
     with open(os.path.join(output_dirname, output_filename), 'wb') as f:
         f.write(r.content)
     dcm = read_file(os.path.join(output_dirname, output_filename))
-    pixel_array = np.array(dcm.pixel_array)
-    if len(pixel_array.shape) == 3 and pixel_array.shape[2] == 3:
+
+    try:
+        get_pixeldata(dcm)
+    except NotImplementedError:
+        dcm.decompress()
+    pixel_array = dcm.pixel_array
+
+    is_three_channel = len(pixel_array.shape) == 3 and pixel_array.shape[2] == 3
+    if is_three_channel:
         zero_val = np.array([0, 0, 0])
     else:
         zero_val = 0
